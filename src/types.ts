@@ -88,6 +88,10 @@ export interface ContextSnapshot {
   compactedAt: string | null;
 }
 
+export interface SessionRuntimeState {
+  snapshot: ContextSnapshot;
+}
+
 export interface ContextUpdateResult {
   message: SessionMessage;
   flushed: boolean;

@@ -5,9 +5,17 @@
   "type": "module",
   "main": "dist/src/index.js",
   "types": "dist/src/index.d.ts",
+  "bin": {
+    "context-governor": "dist/src/cli.js"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test dist/test/**/*.test.js"
+    "test": "npm run build && node --test dist/test/**/*.test.js",
+    "cli:init": "node dist/src/cli.js init",
+    "cli:append": "node dist/src/cli.js append",
+    "cli:flush": "node dist/src/cli.js flush",
+    "cli:compact": "node dist/src/cli.js compact",
+    "cli:resume": "node dist/src/cli.js resume"
   },
   "devDependencies": {
     "@types/node": "^22.15.3",

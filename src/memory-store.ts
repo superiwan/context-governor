@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile, appendFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 
-import type { MemoryRecord, MemoryState } from "./types.js";
+import type { ContextSnapshot, MemoryRecord, MemoryState, SessionRuntimeState } from "./types.js";
 
 const EMPTY_STATE: MemoryState = {
   goals: [],
@@ -48,6 +48,28 @@ export class FileMemoryStore {
     await mkdir(dirname(filePath), { recursive: true });
     await writeFile(filePath, JSON.stringify(payload, null, 2), "utf8");
     return filePath;
+  }
+
+  async getRuntimeState(sessionId: string): Promise<SessionRuntimeState> {
+    const runtimePath = this.getRuntimePath(sessionId);
+    try {
+      const raw = await readFile(runtimePath, "utf8");
+      return JSON.parse(raw) as SessionRuntimeState;
+    } catch {
+      return {
+        snapshot: {
+          workingMessages: [],
+          summary: null,
+          compactedAt: null,
+        },
+      };
+    }
+  }
+
+  async saveRuntimeState(sessionId: string, snapshot: ContextSnapshot): Promise<void> {
+    const runtimePath = this.getRuntimePath(sessionId);
+    await mkdir(dirname(runtimePath), { recursive: true });
+    await writeFile(runtimePath, JSON.stringify({ snapshot }, null, 2), "utf8");
   }
 
   private async rebuildState(sessionId: string): Promise<void> {
@@ -108,6 +130,10 @@ export class FileMemoryStore {
 
   private getStatePath(sessionId: string): string {
     return join(this.baseDir, sessionId, "state.json");
+  }
+
+  private getRuntimePath(sessionId: string): string {
+    return join(this.baseDir, sessionId, "context.json");
   }
 }
 

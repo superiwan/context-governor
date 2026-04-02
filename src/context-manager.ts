@@ -34,6 +34,7 @@ interface ContextManagerOptions {
   memoryStore: FileMemoryStore;
   instructionSources?: Record<string, string>;
   compactionEngine?: CompactionEngine;
+  initialSnapshot?: ContextSnapshot;
 }
 
 export class ContextManager {
@@ -68,6 +69,14 @@ export class ContextManager {
     this.memoryStore = options.memoryStore;
     this.injector = new InstructionInjector(options.instructionSources ?? {});
     this.compactionEngine = options.compactionEngine ?? new CompactionEngine();
+    if (options.initialSnapshot) {
+      this.snapshot = {
+        workingMessages: [...options.initialSnapshot.workingMessages],
+        summary: options.initialSnapshot.summary,
+        compactedAt: options.initialSnapshot.compactedAt,
+      };
+      this.messages = [...options.initialSnapshot.workingMessages];
+    }
   }
 
   async addMessage(input: IncomingMessage): Promise<ContextUpdateResult> {
@@ -97,26 +106,7 @@ export class ContextManager {
       this.config.maxContextTokens - Math.floor(this.config.memoryFlush.softThresholdTokens / 2);
 
     if (this.getUsedTokens() >= compactionTrigger) {
-      const memoryState = await this.memoryStore.getState(this.sessionId);
-      const injectedSections = this.injector.inject(this.config.postCompactionSections);
-      const result = this.compactionEngine.compact(
-        this.messages,
-        this.config,
-        injectedSections,
-        memoryState,
-      );
-
-      await this.memoryStore.writeSnapshot(this.sessionId, `${Date.now()}-pre`, {
-        messages: this.messages,
-      });
-      await this.memoryStore.writeSnapshot(this.sessionId, `${Date.now()}-post`, result);
-
-      this.messages = buildWorkingMessages(result, this.messages);
-      this.snapshot = {
-        workingMessages: [...this.messages],
-        summary: result.summary,
-        compactedAt: new Date().toISOString(),
-      };
+      await this.compactInternal();
       compacted = true;
       remainingTokens = this.getRemainingTokens();
     } else {
@@ -125,6 +115,7 @@ export class ContextManager {
         summary: this.snapshot.summary,
         compactedAt: this.snapshot.compactedAt,
       };
+      await this.memoryStore.saveRuntimeState(this.sessionId, this.snapshot);
     }
 
     return {
@@ -144,12 +135,55 @@ export class ContextManager {
     };
   }
 
+  async flushNow(): Promise<boolean> {
+    const records = extractMemoryRecords(
+      this.sessionId,
+      this.messages.slice(-this.config.memoryFlush.lookbackMessages),
+    );
+    if (records.length === 0) {
+      return false;
+    }
+
+    await this.memoryStore.append(this.sessionId, records);
+    await this.memoryStore.saveRuntimeState(this.sessionId, this.snapshot);
+    return true;
+  }
+
+  async compactNow(): Promise<ContextSnapshot> {
+    await this.compactInternal();
+    return this.getSnapshot();
+  }
+
   private getUsedTokens(): number {
     return this.messages.reduce((sum, message) => sum + message.tokenEstimate, 0);
   }
 
   private getRemainingTokens(): number {
     return this.config.maxContextTokens - this.getUsedTokens();
+  }
+
+  private async compactInternal(): Promise<void> {
+    const memoryState = await this.memoryStore.getState(this.sessionId);
+    const injectedSections = this.injector.inject(this.config.postCompactionSections);
+    const result = this.compactionEngine.compact(
+      this.messages,
+      this.config,
+      injectedSections,
+      memoryState,
+    );
+
+    await this.memoryStore.writeSnapshot(this.sessionId, `${Date.now()}-pre`, {
+      messages: this.messages,
+    });
+    await this.memoryStore.writeSnapshot(this.sessionId, `${Date.now()}-post`, result);
+
+    this.messages = buildWorkingMessages(result, this.messages);
+    this.snapshot = {
+      workingMessages: [...this.messages],
+      summary: result.summary,
+      compactedAt: new Date().toISOString(),
+    };
+    await this.memoryStore.saveRuntimeState(this.sessionId, this.snapshot);
   }
 }
 

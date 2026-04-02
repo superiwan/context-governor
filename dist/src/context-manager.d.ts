@@ -5,6 +5,7 @@ interface ContextManagerOptions {
     memoryStore: FileMemoryStore;
     instructionSources?: Record<string, string>;
     compactionEngine?: CompactionEngine;
+    initialSnapshot?: ContextSnapshot;
 }
 export declare class ContextManager {
     private readonly sessionId;
@@ -17,7 +18,10 @@ export declare class ContextManager {
     constructor(sessionId: string, config: Partial<CompactionConfig>, options: ContextManagerOptions);
     addMessage(input: IncomingMessage): Promise<ContextUpdateResult>;
     getSnapshot(): ContextSnapshot;
+    flushNow(): Promise<boolean>;
+    compactNow(): Promise<ContextSnapshot>;
     private getUsedTokens;
     private getRemainingTokens;
+    private compactInternal;
 }
 export {};

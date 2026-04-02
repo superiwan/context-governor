@@ -40,6 +40,27 @@ export class FileMemoryStore {
         await writeFile(filePath, JSON.stringify(payload, null, 2), "utf8");
         return filePath;
     }
+    async getRuntimeState(sessionId) {
+        const runtimePath = this.getRuntimePath(sessionId);
+        try {
+            const raw = await readFile(runtimePath, "utf8");
+            return JSON.parse(raw);
+        }
+        catch {
+            return {
+                snapshot: {
+                    workingMessages: [],
+                    summary: null,
+                    compactedAt: null,
+                },
+            };
+        }
+    }
+    async saveRuntimeState(sessionId, snapshot) {
+        const runtimePath = this.getRuntimePath(sessionId);
+        await mkdir(dirname(runtimePath), { recursive: true });
+        await writeFile(runtimePath, JSON.stringify({ snapshot }, null, 2), "utf8");
+    }
     async rebuildState(sessionId) {
         const factsPath = this.getFactsPath(sessionId);
         let raw = "";
@@ -92,6 +113,9 @@ export class FileMemoryStore {
     }
     getStatePath(sessionId) {
         return join(this.baseDir, sessionId, "state.json");
+    }
+    getRuntimePath(sessionId) {
+        return join(this.baseDir, sessionId, "context.json");
     }
 }
 function normalizeContent(content) {
