@@ -1,0 +1,9 @@
+memory/
+coverage/
+*.log
+
+# Keep for existing repo history only. New clones should not commit dependencies.
+node_modules/
+
+# Keep build output local unless you explicitly want to publish compiled artifacts.
+dist/

@@ -57,10 +57,18 @@ flowchart TD
 当前已经接好的全局脚本有：
 
 - `context-governor-init.ps1`
+- `context-governor-adopt.ps1`
 - `context-governor-resume.ps1`
 - `context-governor-checkpoint.ps1`
 - `context-governor-flush.ps1`
 - `context-governor-compact.ps1`
+
+为了让别人能按仓库完整复现这套应用端接法，仓库里现在也包含：
+
+- 全局脚本样例目录：`scripts/codex-global/`
+- 用户级 `AGENTS.md` 模板：`templates/codex-user/AGENTS.md`
+
+也就是说，别人拉取这个仓库后，不只能跑库本身，还能照着模板把 Codex 应用端全局工作流配置起来。
 
 Codex 应用里的默认工作节奏是：
 
@@ -70,6 +78,24 @@ Codex 应用里的默认工作节奏是：
 4. 用户确认了目标、约束、待办、关键文件后，agent 做 `checkpoint`
 5. 阶段结束时 `flush`
 6. 会话变长、切子任务、准备交接时 `compact`
+
+如果是新开对话但要继续旧任务：
+
+7. 先执行 `adopt`
+8. 再 `resume`
+
+`adopt` 的默认选择逻辑：
+
+- 如果明确给了 `SourceSessionId`，就接管指定 session
+- 否则如果给了 `SourceThreadId`，就接管那个线程对应的 session
+- 否则自动从 `events.jsonl` 里挑当前 workspace 最近活跃的 session
+- 如果事件日志里没有可用候选，再退回到 `latestSessionId`
+
+多开会话时的隔离策略：
+
+- 优先按 `CODEX_THREAD_ID` 隔离
+- 也就是同一个 workspace 下，不同 Codex 会话线程会绑定到不同 `sessionId`
+- 只有在拿不到 `CODEX_THREAD_ID` 时，才会退回到 workspace 级别的 `latestSessionId`
 
 ## 文件会存到哪里
 
@@ -83,6 +109,7 @@ Codex 应用里的默认工作节奏是：
 
 ```text
 C:\Users\prohibit\.codex\memories\context-governor\
+  events.jsonl
   workspace-sessions.json
   <sessionId>\
     config.json
@@ -96,8 +123,11 @@ C:\Users\prohibit\.codex\memories\context-governor\
 
 各文件作用：
 
+- `events.jsonl`
+  - 全局事件日志，记录 `init / resume / checkpoint / flush / compact` 是否触发
 - `workspace-sessions.json`
-  - 记录“某个 workspace 当前对应哪个 sessionId”
+  - 记录“某个 workspace 下，不同 threadId 对应哪个 sessionId”
+  - 同时保留一个 `latestSessionId` 作为无 threadId 时的兜底
 - `facts.jsonl`
   - 原始增量记忆账本
 - `state.json`
@@ -162,15 +192,57 @@ artifact: src/context-manager.ts
 - 不需要完全依赖聊天窗口剩余上下文
 - 长任务续接更稳
 
-### 例子 3：你想确认这套机制有没有真的生效
+### 例子 2.5：新开一个对话，但想接着上一个会话继续
+
+场景：
+
+- 你开了一个新的 Codex 对话线程
+- 但本质上还是想继续上一个线程里做到一半的任务
+
+实际流程：
+
+1. 新线程默认会有新的 `CODEX_THREAD_ID`
+2. 这时不能直接依赖同线程 `resume`，因为它还没绑定到旧 session
+3. 应先执行 `context-governor-adopt.ps1`
+4. `adopt` 会把“当前新线程”绑定到旧的 `sessionId`
+5. 随后再执行 `resume`
+
+结果：
+
+- 新线程可以显式继承旧线程的任务状态
+- 同时又不会让所有线程默认串到一起
+- 如果你没有指定来源，系统会优先选择最近活跃的旧 session
+
+### 例子 3：同一个工程里同时开两个 Codex 会话
+
+场景：
+
+- 你在同一个工程里同时开两个不同的 Codex 会话
+- 一个会话在做“重构”
+- 另一个会话在做“调试”
+
+实际流程：
+
+1. 两个会话各自有自己的 `CODEX_THREAD_ID`
+2. `context-governor-init` 会优先用 `workspace + threadId` 建立映射
+3. 后续的 `resume / checkpoint / flush / compact` 都优先按当前 threadId 查自己的 session
+
+结果：
+
+- 同一工程下的不同 Codex 会话，不会默认共用一份记忆
+- “重构”不会覆盖“调试”的 todo 和状态
+- 事件日志里也能看到每条事件属于哪个 `threadId`
+
+### 例子 4：你想确认这套机制有没有真的生效
 
 最直接的检查路径：
 
-1. 看 `workspace-sessions.json` 里有没有当前工程路径
-2. 看对应 session 目录有没有生成
-3. 看 `facts.jsonl` 里有没有 `goal / constraint / todo / artifact`
-4. 看 `state.json` 里有没有 active memory
-5. 看 `context.json` 是否在 compaction 后更新
+1. 先看 `events.jsonl` 里有没有当前 workspace 的 `init / resume / checkpoint / flush / compact`
+2. 再看 `workspace-sessions.json` 里有没有当前工程路径
+3. 看对应 session 目录有没有生成
+4. 看 `facts.jsonl` 里有没有 `goal / constraint / todo / artifact`
+5. 看 `state.json` 里有没有 active memory
+6. 看 `context.json` 是否在 compaction 后更新
 
 一个真实的 `resume` 输出会像这样：
 
@@ -185,6 +257,46 @@ artifact: src/context-manager.ts
 - [goal] 让 Codex 应用全局自动使用上下文治理
 - [constraint] 用户不手动使用 CLI
 - [todo/active] 通过全局 AGENTS 和脚本驱动自动调用
+```
+
+一个真实的 `events.jsonl` 事件会像这样：
+
+```json
+{"timestamp":"2026-04-02T16:44:13.0000000+08:00","eventType":"checkpoint","sessionId":"20260402-164249-global-app-smoke","workspacePath":"D:\\ai_project","data":{"goalCount":1,"constraintCount":1,"decisionCount":0,"todoCount":1,"doneCount":0,"artifactCount":1,"flushAfter":true,"compactAfter":false}}
+```
+
+`adopt` 事件会像这样：
+
+```json
+{"timestamp":"2026-04-02T18:00:00.0000000+08:00","eventType":"adopt","sessionId":"20260402-172233-event-log-smoke","workspacePath":"D:\\ai_project","threadId":"<current-thread>","data":{"sourceSessionId":"20260402-172233-event-log-smoke","sourceThreadId":"<old-thread>","autoSelected":true}}
+```
+
+如果你只是想确认“agent 到底有没有自动触发这套机制”，优先看：
+
+- `C:\Users\prohibit\.codex\memories\context-governor\events.jsonl`
+
+只要这里有持续写入事件，就说明后台自动化在工作。
+
+如果你还想确认多会话是否真的隔离，可以再看：
+
+- `C:\Users\prohibit\.codex\memories\context-governor\workspace-sessions.json`
+
+一个真实的映射会像这样：
+
+```json
+{
+  "d:\\ai_project": {
+    "latestSessionId": "20260402-172859-thread-h",
+    "threads": {
+      "thread-g": {
+        "sessionId": "20260402-172859-thread-g"
+      },
+      "thread-h": {
+        "sessionId": "20260402-172859-thread-h"
+      }
+    }
+  }
+}
 ```
 
 ## CLI 和脚本层
@@ -255,6 +367,7 @@ await manager.addMessage({
 - `qualityGuard` 目前只做结构完整性校验，不做重生成闭环
 - CLI / 脚本模式下，当前工作上下文会写入 `context.json`，用于跨命令续接
 - 现在的“应用端自动调用”本质上是全局工作流自动化，不是直接改写 Codex 内核压缩器
+- 多会话隔离依赖 `CODEX_THREAD_ID`；拿不到该值时，会退回到 workspace 级别的 `latestSessionId`
 
 ## 配合 Codex 使用
 
@@ -263,8 +376,16 @@ await manager.addMessage({
 - 全局规则：[C:\Users\prohibit\.codex\AGENTS.md](C:\Users\prohibit\.codex\AGENTS.md)
 - 全局脚本目录：`C:\Users\prohibit\.codex\scripts`
 - 全局记忆目录：`C:\Users\prohibit\.codex\memories\context-governor`
+- 新线程接管旧任务时用：
+  - `C:\Users\prohibit\.codex\scripts\context-governor-adopt.ps1`
 
 如果你想看项目侧包装：
 
 - 启动脚本：[start-codex-session.ps1](D:\ai_project\scripts\start-codex-session.ps1)
 - 项目级规则示例：[AGENTS.md](D:\ai_project\AGENTS.md)
+
+如果你想把这套能力发布给别人，建议按这个顺序：
+
+1. 复制 `scripts/codex-global/` 下的脚本到自己的 `C:\Users\<用户名>\.codex\scripts`
+2. 参考 `templates/codex-user/AGENTS.md` 更新自己的用户级 `AGENTS.md`
+3. 再根据本机路径修改脚本里的 `GovernorDir` 和 `MemoryDir`
