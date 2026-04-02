@@ -63,6 +63,15 @@ flowchart TD
 - `context-governor-flush.ps1`
 - `context-governor-compact.ps1`
 
+推荐安装方式：
+
+1. 把本仓库放到用户级固定目录，例如 `C:\Users\<用户名>\.codex\tools\context-governor`
+2. 把 `scripts/codex-global/` 下的脚本复制到 `C:\Users\<用户名>\.codex\scripts`
+3. 把 `templates/codex-user/AGENTS.md` 的内容合并到用户级 `AGENTS.md`
+4. 根据本机用户名和路径，检查脚本里的 `GovernorDir` 与 `MemoryDir`
+
+这样以后你打开任何新项目，都只依赖用户级 `.codex` 配置，不依赖某个具体业务工程目录。
+
 为了让别人能按仓库完整复现这套应用端接法，仓库里现在也包含：
 
 - 全局脚本样例目录：`scripts/codex-global/`
@@ -386,6 +395,7 @@ await manager.addMessage({
 
 如果你想把这套能力发布给别人，建议按这个顺序：
 
-1. 复制 `scripts/codex-global/` 下的脚本到自己的 `C:\Users\<用户名>\.codex\scripts`
-2. 参考 `templates/codex-user/AGENTS.md` 更新自己的用户级 `AGENTS.md`
-3. 再根据本机路径修改脚本里的 `GovernorDir` 和 `MemoryDir`
+1. 把仓库放到自己的 `C:\Users\<用户名>\.codex\tools\context-governor`
+2. 复制 `scripts/codex-global/` 下的脚本到自己的 `C:\Users\<用户名>\.codex\scripts`
+3. 参考 `templates/codex-user/AGENTS.md` 更新自己的用户级 `AGENTS.md`
+4. 再根据本机路径修改脚本里的 `GovernorDir` 和 `MemoryDir`

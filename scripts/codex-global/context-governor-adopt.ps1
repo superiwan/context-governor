@@ -6,7 +6,7 @@ param(
 
     [string]$SourceThreadId = "",
 
-    [string]$GovernorDir = "D:\ai_project\context-governor",
+    [string]$GovernorDir = "C:\Users\prohibit\.codex\tools\context-governor",
 
     [string]$MemoryDir = "C:\Users\prohibit\.codex\memories\context-governor",
 
