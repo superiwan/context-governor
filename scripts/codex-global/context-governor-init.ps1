@@ -14,131 +14,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-
-function Read-JsonFile {
-    param(
-        [string]$Path,
-        $Fallback
-    )
-
-    if (-not (Test-Path $Path)) {
-        return $Fallback
-    }
-
-    $raw = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
-    if ([string]::IsNullOrWhiteSpace($raw)) {
-        return $Fallback
-    }
-
-    $parsed = $raw | ConvertFrom-Json
-    return ConvertTo-Hashtable $parsed
-}
-
-function ConvertTo-Hashtable {
-    param($Value)
-
-    if ($null -eq $Value) {
-        return $null
-    }
-
-    if ($Value -is [System.Collections.IDictionary]) {
-        $table = @{}
-        foreach ($key in $Value.Keys) {
-            $table[$key] = ConvertTo-Hashtable $Value[$key]
-        }
-        return $table
-    }
-
-    if ($Value -is [System.Collections.IEnumerable] -and -not ($Value -is [string])) {
-        $items = @()
-        foreach ($item in $Value) {
-            $items += @(ConvertTo-Hashtable $item)
-        }
-        return $items
-    }
-
-    if ($Value -is [pscustomobject]) {
-        $table = @{}
-        foreach ($prop in $Value.PSObject.Properties) {
-            $table[$prop.Name] = ConvertTo-Hashtable $prop.Value
-        }
-        return $table
-    }
-
-    return $Value
-}
-
-function Write-JsonFile {
-    param(
-        [string]$Path,
-        $Value
-    )
-
-    $dir = Split-Path -Parent $Path
-    if (-not (Test-Path $dir)) {
-        New-Item -ItemType Directory -Path $dir | Out-Null
-    }
-
-    $json = $Value | ConvertTo-Json -Depth 10
-    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText($Path, $json, $utf8NoBom)
-}
-
-function Append-EventLog {
-    param(
-        [string]$MemoryDir,
-        [string]$SessionId,
-        [string]$WorkspacePath,
-        [string]$EventType,
-        [string]$ThreadId = "",
-        [hashtable]$Data = @{}
-    )
-
-    $eventPath = Join-Path $MemoryDir "events.jsonl"
-    $event = @{
-        timestamp = (Get-Date).ToString("o")
-        eventType = $EventType
-        sessionId = $SessionId
-        workspacePath = $WorkspacePath
-        threadId = $ThreadId
-        data = $Data
-    }
-    Add-Content -LiteralPath $eventPath -Value (($event | ConvertTo-Json -Compress) + [Environment]::NewLine) -Encoding UTF8
-}
-
-function Invoke-WithFileLock {
-    param(
-        [string]$LockPath,
-        [scriptblock]$Action
-    )
-
-    $acquired = $false
-    try {
-        for ($i = 0; $i -lt 100; $i++) {
-            try {
-                New-Item -ItemType Directory -Path $LockPath -ErrorAction Stop | Out-Null
-                $acquired = $true
-                break
-            } catch {
-                Start-Sleep -Milliseconds 100
-            }
-        }
-
-        if (-not $acquired) {
-            throw "Failed to acquire lock: $LockPath"
-        }
-
-        & $Action
-    }
-    finally {
-        if ($acquired -and (Test-Path $LockPath)) {
-            try {
-                Remove-Item -LiteralPath $LockPath -Recurse -Force -ErrorAction Stop
-            } catch {
-            }
-        }
-    }
-}
+. "$PSScriptRoot\context-governor-common.ps1"
 
 function New-SessionId {
     param([string]$TaskName)
@@ -153,12 +29,13 @@ function New-SessionId {
 
 $resolvedWorkspace = [System.IO.Path]::GetFullPath($WorkspacePath)
 $workspaceKey = $resolvedWorkspace.ToLowerInvariant()
+$workspaceMemoryDir = Ensure-WorkspaceMemoryDir -MemoryRoot $MemoryDir -WorkspacePath $resolvedWorkspace
 $resolvedThreadId = $ThreadId
 if ([string]::IsNullOrWhiteSpace($resolvedThreadId)) {
     $resolvedThreadId = $env:CODEX_THREAD_ID
 }
-$mappingPath = Join-Path $MemoryDir "workspace-sessions.json"
-$lockPath = Join-Path $MemoryDir ".workspace-sessions.lock"
+$mappingPath = Join-Path $workspaceMemoryDir "workspace-sessions.json"
+$lockPath = Join-Path $workspaceMemoryDir ".workspace-sessions.lock"
 $reuseSession = $false
 $sessionId = ""
 
@@ -206,10 +83,6 @@ if (-not (Test-Path $GovernorDir)) {
     throw "Governor directory not found: $GovernorDir"
 }
 
-if (-not (Test-Path $MemoryDir)) {
-    New-Item -ItemType Directory -Path $MemoryDir | Out-Null
-}
-
 Push-Location $GovernorDir
 try {
     npm run build | Out-Host
@@ -221,12 +94,12 @@ try {
         output   = "输出简洁，优先状态、原因、修复、下一步。"
     }
 
-    $instructionsPath = Join-Path $MemoryDir "$sessionId-instructions.json"
+    $instructionsPath = Join-Path $workspaceMemoryDir "$sessionId-instructions.json"
     Write-JsonFile -Path $instructionsPath -Value $instructions
 
     node .\dist\src\cli.js init `
         --session $sessionId `
-        --memoryDir $MemoryDir `
+        --memoryDir $workspaceMemoryDir `
         --sectionsFile $instructionsPath `
         --recentTurnsPreserve 5 `
         --softThresholdTokens 4000 `
@@ -238,13 +111,13 @@ finally {
     Pop-Location
 }
 
-Append-EventLog -MemoryDir $MemoryDir -SessionId $sessionId -WorkspacePath $resolvedWorkspace -ThreadId $resolvedThreadId -EventType "init" -Data @{
+Append-EventLog -MemoryDir $workspaceMemoryDir -SessionId $sessionId -WorkspacePath $resolvedWorkspace -ThreadId $resolvedThreadId -EventType "init" -Data @{
     taskName = $TaskName
     forceNew = [bool]$ForceNew
     reused = $reuseSession
 }
 
-$sessionDir = Join-Path $MemoryDir $sessionId
+$sessionDir = Join-Path $workspaceMemoryDir $sessionId
 $briefPath = Join-Path $sessionDir "workspace-brief.md"
 $brief = @"
 # Context Governor Session
@@ -252,7 +125,7 @@ $brief = @"
 - workspace: $resolvedWorkspace
 - sessionId: $sessionId
 - task: $TaskName
-- memoryDir: $MemoryDir
+- memoryDir: $workspaceMemoryDir
 
 ## Agent workflow
 
@@ -268,7 +141,9 @@ $result = @{
     workspacePath = $resolvedWorkspace
     sessionId = $sessionId
     threadId = $resolvedThreadId
-    memoryDir = $MemoryDir
+    memoryRootDir = [System.IO.Path]::GetFullPath($MemoryDir)
+    memoryDir = $workspaceMemoryDir
+    workspaceMemoryDir = $workspaceMemoryDir
     briefPath = $briefPath
 }
 

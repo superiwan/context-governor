@@ -110,7 +110,7 @@ Codex 应用里的默认工作节奏是：
 
 默认不会把治理文件写进你的工程目录，也不会污染 Git 仓库。
 
-统一存到用户目录：
+统一存到用户目录根下，但会再按 workspace 单独分文件夹：
 
 `C:\Users\prohibit\.codex\memories\context-governor`
 
@@ -118,25 +118,36 @@ Codex 应用里的默认工作节奏是：
 
 ```text
 C:\Users\prohibit\.codex\memories\context-governor\
-  events.jsonl
-  workspace-sessions.json
-  <sessionId>\
-    config.json
-    instructions.json
-    context.json
-    facts.jsonl
-    state.json
-    workspace-brief.md
-    snapshots\
+  workspaces\
+    ai-project-4b84b15b\
+      workspace.json
+      events.jsonl
+      workspace-sessions.json
+      <sessionId>\
+        config.json
+        instructions.json
+        context.json
+        facts.jsonl
+        state.json
+        workspace-brief.md
+        snapshots\
 ```
+
+也就是说：
+
+- 所有工程仍然挂在同一个根目录下，方便统一备份
+- 但每个工程都会有自己单独的子目录，不再把不同工程的 session 平铺混在一起
+- 子目录名会带工程名和短哈希，避免同名文件夹冲突
 
 各文件作用：
 
 - `events.jsonl`
-  - 全局事件日志，记录 `init / resume / checkpoint / flush / compact` 是否触发
+  - 当前 workspace 自己的事件日志，记录 `init / resume / checkpoint / flush / compact` 是否触发
 - `workspace-sessions.json`
-  - 记录“某个 workspace 下，不同 threadId 对应哪个 sessionId”
+  - 记录“当前 workspace 下，不同 threadId 对应哪个 sessionId”
   - 同时保留一个 `latestSessionId` 作为无 threadId 时的兜底
+- `workspace.json`
+  - 当前子目录对应的是哪个真实工程路径
 - `facts.jsonl`
   - 原始增量记忆账本
 - `state.json`
@@ -187,10 +198,11 @@ artifact: src/context-manager.ts
 
 实际流程：
 
-1. agent 通过 workspace 路径查 `workspace-sessions.json`
-2. 找到对应的 `sessionId`
-3. 执行 `resume`
-4. 从 `state.json + context.json + instructions.json` 里恢复：
+1. agent 先定位当前工程对应的 workspace 子目录
+2. 再通过这个子目录里的 `workspace-sessions.json` 找 session
+3. 找到对应的 `sessionId`
+4. 执行 `resume`
+5. 从 `state.json + context.json + instructions.json` 里恢复：
    - 当前目标
    - 已确认约束
    - 未完成事项
@@ -246,12 +258,13 @@ artifact: src/context-manager.ts
 
 最直接的检查路径：
 
-1. 先看 `events.jsonl` 里有没有当前 workspace 的 `init / resume / checkpoint / flush / compact`
-2. 再看 `workspace-sessions.json` 里有没有当前工程路径
-3. 看对应 session 目录有没有生成
-4. 看 `facts.jsonl` 里有没有 `goal / constraint / todo / artifact`
-5. 看 `state.json` 里有没有 active memory
-6. 看 `context.json` 是否在 compaction 后更新
+1. 先看当前工程对应的 workspace 子目录有没有生成
+2. 再看这个子目录里的 `events.jsonl` 有没有 `init / resume / checkpoint / flush / compact`
+3. 看这个子目录里的 `workspace-sessions.json` 是否存在
+4. 看对应 session 目录有没有生成
+5. 看 `facts.jsonl` 里有没有 `goal / constraint / todo / artifact`
+6. 看 `state.json` 里有没有 active memory
+7. 看 `context.json` 是否在 compaction 后更新
 
 一个真实的 `resume` 输出会像这样：
 
@@ -282,13 +295,13 @@ artifact: src/context-manager.ts
 
 如果你只是想确认“agent 到底有没有自动触发这套机制”，优先看：
 
-- `C:\Users\prohibit\.codex\memories\context-governor\events.jsonl`
+- `C:\Users\prohibit\.codex\memories\context-governor\workspaces\<workspace-folder>\events.jsonl`
 
 只要这里有持续写入事件，就说明后台自动化在工作。
 
 如果你还想确认多会话是否真的隔离，可以再看：
 
-- `C:\Users\prohibit\.codex\memories\context-governor\workspace-sessions.json`
+- `C:\Users\prohibit\.codex\memories\context-governor\workspaces\<workspace-folder>\workspace-sessions.json`
 
 一个真实的映射会像这样：
 
