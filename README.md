@@ -57,6 +57,7 @@ flowchart TD
 当前已经接好的全局脚本有：
 
 - `context-governor-init.ps1`
+- `context-governor-autostart.ps1`
 - `context-governor-adopt.ps1`
 - `context-governor-resume.ps1`
 - `context-governor-checkpoint.ps1`
@@ -69,6 +70,7 @@ flowchart TD
 2. 把 `scripts/codex-global/` 下的脚本复制到 `C:\Users\<用户名>\.codex\scripts`
 3. 把 `templates/codex-user/AGENTS.md` 的内容合并到用户级 `AGENTS.md`
 4. 根据本机用户名和路径，检查脚本里的 `GovernorDir` 与 `MemoryDir`
+5. 把 `context-governor-autostart.ps1` 挂到 `hooks.json` 的 `SessionStart`，实现“有历史就 resume、没有就 init”
 
 这样以后你打开任何新项目，都只依赖用户级 `.codex` 配置，不依赖某个具体业务工程目录。
 
@@ -76,6 +78,7 @@ flowchart TD
 
 - 全局脚本样例目录：`scripts/codex-global/`
 - 用户级 `AGENTS.md` 模板：`templates/codex-user/AGENTS.md`
+- 用户实际规则参考：`templates/codex-user/AGENTS.reference.md`
 
 也就是说，别人拉取这个仓库后，不只能跑库本身，还能照着模板把 Codex 应用端全局工作流配置起来。
 
