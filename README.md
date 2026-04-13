@@ -21,8 +21,8 @@
 1. `init`：为当前 session 建立治理目录和规则
 2. `resume`：恢复当前目标、约束、待办、规则和最近上下文
 3. `checkpoint`：把刚确认的重要事实写成结构化条目
-4. `flush`：把这些事实持久化到记忆文件
-5. `compact`：在会话变长时重建一个可继续执行的短上下文
+4. `flush`：先把高频变化项收敛到当前状态
+5. `compact`：在会话变长时做最终收敛，并重建一个可继续执行的短上下文
 6. 下次继续任务时再次 `resume`
 
 可以把它理解成一条“长会话防失忆流水线”：
@@ -33,7 +33,7 @@ flowchart TD
     B --> C["resume"]
     C --> D["正常工作"]
     D --> E["checkpoint 关键事实"]
-    E --> F["flush 到持久记忆"]
+    E --> F["flush 到当前状态"]
     D --> G["上下文变长 / 切子任务 / 准备交接"]
     G --> H["compact"]
     H --> I["生成 summary + 更新 context"]
@@ -152,9 +152,9 @@ C:\Users\prohibit\.codex\memories\context-governor\
 - `workspace.json`
   - 当前子目录对应的是哪个真实工程路径
 - `facts.jsonl`
-  - 原始增量记忆账本
+  - 可选调试输出，默认不再充当长期历史账本
 - `state.json`
-  - 当前聚合后的有效记忆视图
+  - 当前有效状态主表，也是 `resume` 的核心来源
 - `context.json`
   - 当前工作上下文快照
 - `instructions.json`
@@ -183,8 +183,8 @@ todo: 先打通 flush 和 compact 主链路
 artifact: src/context-manager.ts
 ```
 
-3. 阶段结束时，agent 会把这些结构化事实 flush 到持久记忆
-4. 当会话变长时，agent 会 compact，保留规则、summary、active memory 和最近几轮对话
+3. 阶段结束时，agent 会把这些结构化事实 flush 到当前状态
+4. 当会话变长时，agent 会 compact，做最终收敛后再保留规则、summary、active memory 和最近几轮对话
 5. 你下次说“继续刚才任务”，agent 先 resume，再继续工作
 
 结果：
@@ -265,9 +265,9 @@ artifact: src/context-manager.ts
 2. 再看这个子目录里的 `events.jsonl` 有没有 `init / resume / checkpoint / flush / compact`
 3. 看这个子目录里的 `workspace-sessions.json` 是否存在
 4. 看对应 session 目录有没有生成
-5. 看 `facts.jsonl` 里有没有 `goal / constraint / todo / artifact`
-6. 看 `state.json` 里有没有 active memory
-7. 看 `context.json` 是否在 compaction 后更新
+5. 看 `state.json` 里有没有当前 active memory
+6. 看 `context.json` 是否在 compaction 后更新
+7. 如果开启了调试 facts，再看 `facts.jsonl` 是否与当前 state 一致
 
 一个真实的 `resume` 输出会像这样：
 
@@ -343,6 +343,8 @@ node dist/src/cli.js append --session demo --memoryDir ../context-governor-memor
 node dist/src/cli.js flush --session demo --memoryDir ../context-governor-memory
 node dist/src/cli.js compact --session demo --memoryDir ../context-governor-memory
 node dist/src/cli.js resume --session demo --memoryDir ../context-governor-memory
+node dist/src/cli.js inspect-state --session demo --memoryDir ../context-governor-memory
+node dist/src/cli.js prune --memoryDir ../context-governor-memory --days 30
 ```
 
 ## 最小代码接入
@@ -389,6 +391,12 @@ await manager.addMessage({
 
 - token 估算使用近似算法，不绑定具体模型 tokenizer
 - 记忆抽取优先依赖结构化前缀，如 `goal:`、`todo:`、`constraint:`
+- 当前实现优先保证“当前状态干净”，不保证长期历史完整保真
+- `goal / decision / todo` 会在 `flush` 时优先收敛
+- `constraint / artifact` 会在 `compact` 时做最终收敛
+- 默认不保留长期调试账本，`facts.jsonl` 只作为可选调试输出
+- `snapshots/` 会按保留上限自动裁剪
+- 可通过 `prune` 删除长期未活跃 session
 - `qualityGuard` 目前只做结构完整性校验，不做重生成闭环
 - CLI / 脚本模式下，当前工作上下文会写入 `context.json`，用于跨命令续接
 - 现在的“应用端自动调用”本质上是全局工作流自动化，不是直接改写 Codex 内核压缩器

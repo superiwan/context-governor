@@ -7,7 +7,7 @@ import { ContextManager } from "./context-manager.js";
 import { FileMemoryStore } from "./memory-store.js";
 import type { CompactionConfig, IncomingMessage } from "./types.js";
 
-type CommandName = "init" | "append" | "flush" | "compact" | "resume";
+type CommandName = "init" | "append" | "flush" | "compact" | "resume" | "prune" | "inspect-state";
 
 interface ParsedArgs {
   command: CommandName;
@@ -34,6 +34,12 @@ async function main(): Promise<void> {
       break;
     case "resume":
       await handleResume(memoryDir, parsed.options);
+      break;
+    case "prune":
+      await handlePrune(memoryDir, parsed.options);
+      break;
+    case "inspect-state":
+      await handleInspectState(memoryDir, parsed.options);
       break;
   }
 }
@@ -74,18 +80,20 @@ async function handleAppend(memoryDir: string, options: Record<string, string | 
     flushed: result.flushed,
     compacted: result.compacted,
     remainingTokens: result.remainingTokens,
+    memoryMutation: result.memoryMutation,
   });
 }
 
 async function handleFlush(memoryDir: string, options: Record<string, string | boolean>): Promise<void> {
   const sessionId = getRequired(options, "session");
   const manager = await loadManager(memoryDir, sessionId);
-  const flushed = await manager.flushNow();
+  const mutation = await manager.flushNow();
   printJson({
     ok: true,
     command: "flush",
     sessionId,
-    flushed,
+    flushed: mutation !== null,
+    memoryMutation: mutation,
   });
 }
 
@@ -131,6 +139,33 @@ async function handleResume(memoryDir: string, options: Record<string, string | 
   process.stdout.write(`${lines.join("\n")}\n`);
 }
 
+async function handlePrune(memoryDir: string, options: Record<string, string | boolean>): Promise<void> {
+  const store = new FileMemoryStore(memoryDir);
+  const days = getNumber(options, "days", defaultConfig().memoryRetention.pruneSessionsAfterDays);
+  const result = await store.pruneSessions(days);
+  printJson({
+    ok: true,
+    command: "prune",
+    memoryDir,
+    days,
+    deletedSessions: result.deletedSessions,
+  });
+}
+
+async function handleInspectState(memoryDir: string, options: Record<string, string | boolean>): Promise<void> {
+  const sessionId = getRequired(options, "session");
+  const store = new FileMemoryStore(memoryDir);
+  const state = await store.getState(sessionId);
+  const runtime = await store.getRuntimeState(sessionId);
+  printJson({
+    ok: true,
+    command: "inspect-state",
+    sessionId,
+    state,
+    pendingCompaction: runtime.pendingCompaction,
+  });
+}
+
 async function loadManager(memoryDir: string, sessionId: string): Promise<ContextManager> {
   const store = new FileMemoryStore(memoryDir);
   const runtime = await store.getRuntimeState(sessionId);
@@ -147,13 +182,14 @@ async function loadManager(memoryDir: string, sessionId: string): Promise<Contex
     memoryStore: store,
     instructionSources: instructions,
     initialSnapshot: runtime.snapshot,
+    initialProcessedMessageIds: runtime.processedMessageIds,
   });
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
   const [command, ...rest] = argv;
-  if (!command || !["init", "append", "flush", "compact", "resume"].includes(command)) {
-    throw new Error("Usage: context-governor <init|append|flush|compact|resume> [options]");
+  if (!command || !["init", "append", "flush", "compact", "resume", "prune", "inspect-state"].includes(command)) {
+    throw new Error("Usage: context-governor <init|append|flush|compact|resume|prune|inspect-state> [options]");
   }
 
   const options: Record<string, string | boolean> = {};
@@ -241,6 +277,20 @@ function buildConfig(options: Record<string, string | boolean>): CompactionConfi
       ...base.qualityGuard,
       maxRetries: getNumber(options, "maxRetries", base.qualityGuard.maxRetries),
     },
+    memoryRetention: {
+      ...base.memoryRetention,
+      keepDebugFacts: getBoolean(
+        options,
+        "keepDebugFacts",
+        base.memoryRetention.keepDebugFacts,
+      ),
+      maxSnapshots: getNumber(options, "maxSnapshots", base.memoryRetention.maxSnapshots),
+      pruneSessionsAfterDays: getNumber(
+        options,
+        "pruneSessionsAfterDays",
+        base.memoryRetention.pruneSessionsAfterDays,
+      ),
+    },
   };
 }
 
@@ -258,6 +308,11 @@ function defaultConfig(): CompactionConfig {
     qualityGuard: {
       enabled: true,
       maxRetries: 0,
+    },
+    memoryRetention: {
+      keepDebugFacts: false,
+      maxSnapshots: 8,
+      pruneSessionsAfterDays: 30,
     },
   };
 }
@@ -283,6 +338,28 @@ function getNumber(options: Record<string, string | boolean>, key: string, fallb
 
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function getBoolean(
+  options: Record<string, string | boolean>,
+  key: string,
+  fallback: boolean,
+): boolean {
+  const value = options[key];
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value !== "string") {
+    return fallback;
+  }
+
+  if (["true", "1", "yes", "on"].includes(value.toLowerCase())) {
+    return true;
+  }
+  if (["false", "0", "no", "off"].includes(value.toLowerCase())) {
+    return false;
+  }
+  return fallback;
 }
 
 function splitCsv(value: string): string[] {

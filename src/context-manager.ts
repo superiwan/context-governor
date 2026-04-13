@@ -5,6 +5,7 @@ import type {
   ContextSnapshot,
   ContextUpdateResult,
   IncomingMessage,
+  MemoryMutationSummary,
   MemoryRecord,
   MemoryRecordStatus,
   MemoryRecordType,
@@ -28,6 +29,11 @@ const DEFAULT_CONFIG: CompactionConfig = {
     enabled: true,
     maxRetries: 0,
   },
+  memoryRetention: {
+    keepDebugFacts: false,
+    maxSnapshots: 8,
+    pruneSessionsAfterDays: 30,
+  },
 };
 
 interface ContextManagerOptions {
@@ -35,6 +41,7 @@ interface ContextManagerOptions {
   instructionSources?: Record<string, string>;
   compactionEngine?: CompactionEngine;
   initialSnapshot?: ContextSnapshot;
+  initialProcessedMessageIds?: string[];
 }
 
 export class ContextManager {
@@ -43,6 +50,7 @@ export class ContextManager {
   private readonly injector: InstructionInjector;
   private readonly compactionEngine: CompactionEngine;
   private messages: SessionMessage[] = [];
+  private processedMessageIds = new Set<string>();
   private snapshot: ContextSnapshot = {
     workingMessages: [],
     summary: null,
@@ -65,6 +73,10 @@ export class ContextManager {
         ...DEFAULT_CONFIG.qualityGuard,
         ...config.qualityGuard,
       },
+      memoryRetention: {
+        ...DEFAULT_CONFIG.memoryRetention,
+        ...config.memoryRetention,
+      },
     };
     this.memoryStore = options.memoryStore;
     this.injector = new InstructionInjector(options.instructionSources ?? {});
@@ -77,6 +89,9 @@ export class ContextManager {
       };
       this.messages = [...options.initialSnapshot.workingMessages];
     }
+    for (const id of options.initialProcessedMessageIds ?? []) {
+      this.processedMessageIds.add(id);
+    }
   }
 
   async addMessage(input: IncomingMessage): Promise<ContextUpdateResult> {
@@ -85,6 +100,7 @@ export class ContextManager {
 
     let flushed = false;
     let compacted = false;
+    let memoryMutation: MemoryMutationSummary | null = null;
     let remainingTokens = this.getRemainingTokens();
 
     if (
@@ -93,10 +109,20 @@ export class ContextManager {
     ) {
       const records = extractMemoryRecords(
         this.sessionId,
-        this.messages.slice(-this.config.memoryFlush.lookbackMessages),
+        this.getUnprocessedMessages(
+          this.messages.slice(-this.config.memoryFlush.lookbackMessages),
+        ),
       );
       if (records.length > 0) {
-        await this.memoryStore.append(this.sessionId, records);
+        this.markMessagesProcessed(
+          this.getUnprocessedMessages(this.messages.slice(-this.config.memoryFlush.lookbackMessages)),
+        );
+        memoryMutation = await this.memoryStore.applyRecords(
+          this.sessionId,
+          records,
+          "flush",
+          this.config.memoryRetention,
+        );
         flushed = true;
       }
     }
@@ -106,6 +132,20 @@ export class ContextManager {
       this.config.maxContextTokens - Math.floor(this.config.memoryFlush.softThresholdTokens / 2);
 
     if (this.getUsedTokens() >= compactionTrigger) {
+      if (!flushed) {
+        const unprocessedCurrent = this.getUnprocessedMessages([message]);
+        const currentTurnRecords = extractMemoryRecords(this.sessionId, unprocessedCurrent);
+        if (currentTurnRecords.length > 0) {
+          this.markMessagesProcessed(unprocessedCurrent);
+          memoryMutation = await this.memoryStore.applyRecords(
+            this.sessionId,
+            currentTurnRecords,
+            "flush",
+            this.config.memoryRetention,
+          );
+          flushed = true;
+        }
+      }
       await this.compactInternal();
       compacted = true;
       remainingTokens = this.getRemainingTokens();
@@ -115,7 +155,12 @@ export class ContextManager {
         summary: this.snapshot.summary,
         compactedAt: this.snapshot.compactedAt,
       };
-      await this.memoryStore.saveRuntimeState(this.sessionId, this.snapshot);
+      await this.memoryStore.saveRuntimeState(
+        this.sessionId,
+        this.snapshot,
+        undefined,
+        Array.from(this.processedMessageIds),
+      );
     }
 
     return {
@@ -124,6 +169,7 @@ export class ContextManager {
       compacted,
       remainingTokens,
       snapshot: this.snapshot,
+      memoryMutation,
     };
   }
 
@@ -135,18 +181,33 @@ export class ContextManager {
     };
   }
 
-  async flushNow(): Promise<boolean> {
+  async flushNow(): Promise<MemoryMutationSummary | null> {
     const records = extractMemoryRecords(
       this.sessionId,
-      this.messages.slice(-this.config.memoryFlush.lookbackMessages),
+      this.getUnprocessedMessages(
+        this.messages.slice(-this.config.memoryFlush.lookbackMessages),
+      ),
     );
     if (records.length === 0) {
-      return false;
+      return null;
     }
 
-    await this.memoryStore.append(this.sessionId, records);
-    await this.memoryStore.saveRuntimeState(this.sessionId, this.snapshot);
-    return true;
+    this.markMessagesProcessed(
+      this.getUnprocessedMessages(this.messages.slice(-this.config.memoryFlush.lookbackMessages)),
+    );
+    const summary = await this.memoryStore.applyRecords(
+      this.sessionId,
+      records,
+      "flush",
+      this.config.memoryRetention,
+    );
+    await this.memoryStore.saveRuntimeState(
+      this.sessionId,
+      this.snapshot,
+      undefined,
+      Array.from(this.processedMessageIds),
+    );
+    return summary;
   }
 
   async compactNow(): Promise<ContextSnapshot> {
@@ -163,6 +224,12 @@ export class ContextManager {
   }
 
   private async compactInternal(): Promise<void> {
+    await this.memoryStore.applyRecords(
+      this.sessionId,
+      [],
+      "compact",
+      this.config.memoryRetention,
+    );
     const memoryState = await this.memoryStore.getState(this.sessionId);
     const injectedSections = this.injector.inject(this.config.postCompactionSections);
     const result = this.compactionEngine.compact(
@@ -176,6 +243,10 @@ export class ContextManager {
       messages: this.messages,
     });
     await this.memoryStore.writeSnapshot(this.sessionId, `${Date.now()}-post`, result);
+    await this.memoryStore.pruneSnapshots(
+      this.sessionId,
+      this.config.memoryRetention.maxSnapshots,
+    );
 
     this.messages = buildWorkingMessages(result, this.messages);
     this.snapshot = {
@@ -183,7 +254,22 @@ export class ContextManager {
       summary: result.summary,
       compactedAt: new Date().toISOString(),
     };
-    await this.memoryStore.saveRuntimeState(this.sessionId, this.snapshot);
+    await this.memoryStore.saveRuntimeState(
+      this.sessionId,
+      this.snapshot,
+      undefined,
+      Array.from(this.processedMessageIds),
+    );
+  }
+
+  private getUnprocessedMessages(messages: SessionMessage[]): SessionMessage[] {
+    return messages.filter((message) => !this.processedMessageIds.has(message.id));
+  }
+
+  private markMessagesProcessed(messages: SessionMessage[]): void {
+    for (const message of messages) {
+      this.processedMessageIds.add(message.id);
+    }
   }
 }
 

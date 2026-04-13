@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, mkdir, writeFile, utimes, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -22,6 +22,11 @@ async function createManager(overrides: Partial<CompactionConfig> = {}) {
         enabled: true,
         softThresholdTokens: 80,
         lookbackMessages: 10,
+      },
+      memoryRetention: {
+        keepDebugFacts: true,
+        maxSnapshots: 4,
+        pruneSessionsAfterDays: 30,
       },
       ...overrides,
     },
@@ -59,10 +64,11 @@ test("flushes high-value memory before compaction", async () => {
   assert.equal(result.flushed, true);
 
   const state = await memoryStore.getState("session-a");
+  const runtime = await memoryStore.getRuntimeState("session-a");
   assert.equal(state.goals[0]?.content, "实现长会话上下文治理");
-  assert.equal(state.constraints[0]?.content, "不要引入重框架");
   assert.equal(state.todos[0]?.content, "完成文件记忆存储");
-  assert.equal(state.artifacts[0]?.content, "src/context-manager.ts");
+  assert.equal(runtime.pendingCompaction.constraints[0]?.content, "不要引入重框架");
+  assert.equal(runtime.pendingCompaction.artifacts[0]?.content, "src/context-manager.ts");
 });
 
 test("compaction preserves injected sections and recent turns", async () => {
@@ -171,4 +177,128 @@ test("state compaction deduplicates repeated goals and keeps done todos", async 
     state.todos.some((item) => item.content === "明确目录结构" && item.status === "done"),
     true,
   );
+});
+
+test("flush strongly replaces latest goal and decision", async () => {
+  const { manager, memoryStore } = await createManager();
+
+  await manager.addMessage({
+    role: "user",
+    content: "goal: 第一目标\ndecision: 第一决策",
+  });
+  await manager.flushNow();
+
+  await manager.addMessage({
+    role: "assistant",
+    content: "goal: 第二目标\ndecision: 第二决策",
+  });
+  const mutation = await manager.flushNow();
+  const state = await memoryStore.getState("session-a");
+
+  assert.equal(state.goals.length, 1);
+  assert.equal(state.goals[0]?.content, "第二目标");
+  assert.equal(state.decisions.length, 1);
+  assert.equal(state.decisions[0]?.content, "第二决策");
+  assert.equal((mutation?.replaced ?? 0) >= 2, true);
+});
+
+test("flush replaces active todo with done", async () => {
+  const { manager, memoryStore } = await createManager();
+
+  await manager.addMessage({
+    role: "user",
+    content: "todo: 写 state.json",
+  });
+  await manager.flushNow();
+
+  await manager.addMessage({
+    role: "assistant",
+    content: "done: 写 state.json",
+  });
+  await manager.flushNow();
+
+  const state = await memoryStore.getState("session-a");
+  assert.equal(state.todos.length, 1);
+  assert.equal(state.todos[0]?.content, "写 state.json");
+  assert.equal(state.todos[0]?.status, "done");
+});
+
+test("constraint and artifact stay pending until compact", async () => {
+  const { manager, memoryStore } = await createManager({
+    maxContextTokens: 500,
+    compactionTriggerTokens: 450,
+    memoryFlush: {
+      enabled: true,
+      softThresholdTokens: 120,
+      lookbackMessages: 10,
+    },
+  });
+
+  await manager.addMessage({
+    role: "user",
+    content: "constraint: 旧约束\nartifact: old.ts",
+  });
+  await manager.flushNow();
+  await manager.compactNow();
+
+  await manager.addMessage({
+    role: "assistant",
+    content: "constraint: 新约束\nartifact: new.ts",
+  });
+  await manager.flushNow();
+
+  let state = await memoryStore.getState("session-a");
+  assert.equal(state.constraints[0]?.content, "旧约束");
+  assert.equal(state.artifacts[0]?.content, "old.ts");
+
+  const runtimeBeforeCompact = await memoryStore.getRuntimeState("session-a");
+  assert.equal(runtimeBeforeCompact.pendingCompaction.constraints[0]?.content, "新约束");
+  assert.equal(runtimeBeforeCompact.pendingCompaction.artifacts[0]?.content, "new.ts");
+
+  await manager.compactNow();
+  state = await memoryStore.getState("session-a");
+  assert.equal(state.constraints.length, 1);
+  assert.equal(state.constraints[0]?.content, "新约束");
+  assert.equal(state.artifacts.length, 1);
+  assert.equal(state.artifacts[0]?.content, "new.ts");
+});
+
+test("compact prunes old snapshots with retention limit", async () => {
+  const { manager, baseDir } = await createManager({
+    memoryRetention: {
+      keepDebugFacts: true,
+      maxSnapshots: 2,
+      pruneSessionsAfterDays: 30,
+    },
+  });
+
+  await manager.addMessage({
+    role: "user",
+    content: "goal: 快照清理测试\nconstraint: 限制快照数量",
+  });
+  await manager.flushNow();
+  await manager.compactNow();
+  await manager.compactNow();
+  await manager.compactNow();
+
+  const snapshotsDir = join(baseDir, "session-a", "snapshots");
+  const files = await readdir(snapshotsDir);
+  assert.equal(files.length <= 2, true);
+});
+
+test("prune removes stale sessions", async () => {
+  const baseDir = await mkdtemp(join(tmpdir(), "context-governor-prune-"));
+  const memoryStore = new FileMemoryStore(baseDir);
+
+  await mkdir(join(baseDir, "old-session"), { recursive: true });
+  await writeFile(join(baseDir, "old-session", "state.json"), JSON.stringify({ ok: true }), "utf8");
+  const oldDate = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000);
+  await utimes(join(baseDir, "old-session", "state.json"), oldDate, oldDate);
+
+  await mkdir(join(baseDir, "fresh-session"), { recursive: true });
+  await writeFile(join(baseDir, "fresh-session", "state.json"), JSON.stringify({ ok: true }), "utf8");
+
+  const result = await memoryStore.pruneSessions(30);
+
+  assert.deepEqual(result.deletedSessions, ["old-session"]);
 });

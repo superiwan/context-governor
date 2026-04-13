@@ -49,6 +49,12 @@ export interface MemoryFlushConfig {
   lookbackMessages: number;
 }
 
+export interface MemoryRetentionConfig {
+  keepDebugFacts: boolean;
+  maxSnapshots: number;
+  pruneSessionsAfterDays: number;
+}
+
 export interface QualityGuardConfig {
   enabled: boolean;
   maxRetries: number;
@@ -61,6 +67,7 @@ export interface CompactionConfig {
   postCompactionSections: string[];
   memoryFlush: MemoryFlushConfig;
   qualityGuard: QualityGuardConfig;
+  memoryRetention: MemoryRetentionConfig;
 }
 
 export interface SummaryAuditResult {
@@ -90,6 +97,18 @@ export interface ContextSnapshot {
 
 export interface SessionRuntimeState {
   snapshot: ContextSnapshot;
+  pendingCompaction: {
+    constraints: MemoryRecord[];
+    artifacts: MemoryRecord[];
+  };
+  processedMessageIds: string[];
+}
+
+export interface MemoryMutationSummary {
+  inserted: number;
+  replaced: number;
+  deleted: number;
+  finalized: number;
 }
 
 export interface ContextUpdateResult {
@@ -98,4 +117,5 @@ export interface ContextUpdateResult {
   compacted: boolean;
   remainingTokens: number;
   snapshot: ContextSnapshot;
+  memoryMutation?: MemoryMutationSummary | null;
 }
